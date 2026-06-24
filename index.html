@@ -538,7 +538,27 @@
   <div class="legend-item"><div class="legend-dot" style="background:var(--ecommerce)"></div> E-commerce</div>
   <div class="legend-item"><div class="legend-dot" style="background:var(--atacado)"></div> Atacado</div>
   <div class="legend-item"><div class="legend-dot" style="background:var(--geral)"></div> Geral / Marca</div>
+  <span id="syncIndicator" style="font-size:11px; font-weight:600; margin-left:8px;"></span>
   <button class="add-btn" onclick="openAddModal()">+ Nova Ação</button>
+</div>
+
+<!-- SETUP INICIAL (aparece só até o bin ser criado) -->
+<div id="setupBanner" style="display:none; background:#FBF6EC; border-bottom:1px solid #E8D5A3; padding:16px 32px;">
+  <div style="max-width:700px;">
+    <div style="font-family:'Cormorant Garamond',serif; font-size:18px; font-weight:600; color:#8B6B10; margin-bottom:6px;">
+      Configuração inicial necessária (só acontece uma vez)
+    </div>
+    <div style="font-size:13px; color:#444; margin-bottom:12px; line-height:1.5;">
+      Este calendário ainda não tem um espaço de armazenamento compartilhado criado. Clique no botão abaixo — vai criar automaticamente e mostrar um código para você me enviar, para eu finalizar a configuração.
+    </div>
+    <button onclick="criarBinAutomatico()" style="background:#C9A84C; border:none; color:#1A1A1A; padding:10px 20px; border-radius:5px; font-weight:600; font-size:13px; cursor:pointer;">
+      Criar espaço de armazenamento agora
+    </button>
+    <div id="setupResult" style="margin-top:14px; display:none;">
+      <div style="font-size:13px; color:#2A4A2A; font-weight:600; margin-bottom:6px;">✓ Criado! Copie o código abaixo e me envie:</div>
+      <div id="setupBinId" style="background:#fff; border:1px solid #C9A84C; border-radius:5px; padding:10px 14px; font-family:monospace; font-size:14px; user-select:all; cursor:text;"></div>
+    </div>
+  </div>
 </div>
 
 <div class="calendar-wrap">
@@ -652,27 +672,115 @@
     geral: { bg: '#F5EFF5', text: '#5A3A5A', badge: '#8B6B8B' }
   };
 
-  // Storage key
-  const STORAGE_KEY = 'go_calendar_events_v1';
+  // ---- STORAGE (compartilhado na nuvem via JSONBin) ----
+  const API_KEY = '$2a$10$9Sb1hV45IfxFDByXBpt3Be49gROuGBXtJsg2xKnhkpTAtqn1e.s3W';
+  let BIN_ID = localStorage.getItem('go_bin_id') || 'PENDING_SETUP';
+  const API_URL_BASE = 'https://api.jsonbin.io/v3/b';
 
-  function loadEvents() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return getDefaultEvents();
-      const parsed = JSON.parse(raw);
-      // Se não tem eventos de julho 2026, reseta com dados novos
-      const hasJuly = parsed.some(e => e.date && e.date.startsWith('2026-07'));
-      if (!hasJuly) {
-        const fresh = getDefaultEvents();
-        saveEvents(fresh);
-        return fresh;
-      }
-      return parsed;
-    } catch(e) { return getDefaultEvents(); }
+  function getApiUrl() {
+    return `${API_URL_BASE}/${BIN_ID}`;
   }
 
-  function saveEvents(events) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(events)); } catch(e) {}
+  async function criarBinAutomatico() {
+    const btn = document.querySelector('#setupBanner button');
+    btn.textContent = 'Criando...';
+    btn.disabled = true;
+    try {
+      const res = await fetch(API_URL_BASE, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Master-Key': API_KEY,
+          'X-Bin-Name': 'calendario-go'
+        },
+        body: JSON.stringify({ events: getDefaultEvents() })
+      });
+      if (!res.ok) throw new Error('Falha ao criar bin: ' + res.status);
+      const data = await res.json();
+      const newBinId = data.metadata.id;
+      localStorage.setItem('go_bin_id', newBinId);
+      BIN_ID = newBinId;
+      document.getElementById('setupBinId').textContent = newBinId;
+      document.getElementById('setupResult').style.display = 'block';
+      btn.style.display = 'none';
+      // Recarrega eventos já com o bin criado
+      events = await loadEvents();
+      render();
+    } catch (e) {
+      alert('Erro ao criar: ' + e.message + '\nVerifique se a chave de API está correta.');
+      btn.textContent = 'Criar espaço de armazenamento agora';
+      btn.disabled = false;
+    }
+  }
+
+  let isSaving = false;
+  let isOnline = true;
+
+  async function loadEvents() {
+    if (BIN_ID === 'PENDING_SETUP') {
+      document.getElementById('setupBanner').style.display = 'block';
+      return getDefaultEvents();
+    }
+    try {
+      const res = await fetch(`${getApiUrl()}/latest`, {
+        headers: { 'X-Master-Key': API_KEY }
+      });
+      if (!res.ok) throw new Error('fetch failed');
+      const data = await res.json();
+      isOnline = true;
+      document.getElementById('setupBanner').style.display = 'none';
+      return data.record.events || getDefaultEvents();
+    } catch (e) {
+      isOnline = false;
+      console.error('Erro ao carregar da nuvem:', e);
+      return getDefaultEvents();
+    }
+  }
+
+  async function saveEvents(eventsList) {
+    if (BIN_ID === 'PENDING_SETUP') {
+      alert('Configure o armazenamento compartilhado primeiro (banner no topo da página).');
+      return;
+    }
+    isSaving = true;
+    updateSyncIndicator('saving');
+    try {
+      const res = await fetch(getApiUrl(), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Master-Key': API_KEY
+        },
+        body: JSON.stringify({ events: eventsList })
+      });
+      if (!res.ok) throw new Error('save failed');
+      isOnline = true;
+      updateSyncIndicator('saved');
+    } catch (e) {
+      isOnline = false;
+      console.error('Erro ao salvar na nuvem:', e);
+      updateSyncIndicator('error');
+    }
+    isSaving = false;
+  }
+
+  function updateSyncIndicator(status) {
+    const el = document.getElementById('syncIndicator');
+    if (!el) return;
+    if (status === 'saving') {
+      el.textContent = '⏳ Salvando...';
+      el.style.color = '#C9A84C';
+    } else if (status === 'saved') {
+      el.textContent = '✓ Sincronizado';
+      el.style.color = '#5A7A5A';
+      setTimeout(() => { if(el) el.textContent = ''; }, 2000);
+    } else if (status === 'error') {
+      el.textContent = '⚠ Erro ao salvar — verifique conexão';
+      el.style.color = '#C04040';
+    } else if (status === 'loading') {
+      el.textContent = '⏳ Carregando dados compartilhados...';
+      el.style.color = '#C9A84C';
+    }
   }
 
   function getDefaultEvents() {
@@ -693,7 +801,23 @@
 
   function uid() { return Math.random().toString(36).substr(2,9); }
 
-  let events = loadEvents();
+  let events = [];
+
+  async function init() {
+    if (BIN_ID !== 'PENDING_SETUP') updateSyncIndicator('loading');
+    events = await loadEvents();
+    render();
+    // Atualiza automaticamente a cada 15 segundos para refletir o que a outra pessoa cadastrou
+    setInterval(async () => {
+      if (isSaving || BIN_ID === 'PENDING_SETUP') return;
+      const fresh = await loadEvents();
+      const changed = JSON.stringify(fresh) !== JSON.stringify(events);
+      events = fresh;
+      if (changed) render();
+    }, 15000);
+  }
+
+  init();
 
   // ---- RENDER ----
   function render() {
@@ -800,7 +924,7 @@
     });
   }
 
-  function saveEvent() {
+  async function saveEvent() {
     const name = document.getElementById('eventName').value.trim();
     const date = document.getElementById('eventDate').value;
     const type = document.getElementById('eventType').value;
@@ -812,9 +936,9 @@
     }
 
     events.push({ id: uid(), frente: selectedFrente, name, date, type, notes });
-    saveEvents(events);
     closeAddModal();
     render();
+    await saveEvents(events);
   }
 
   // ---- DETAIL MODAL ----
@@ -853,13 +977,13 @@
     viewingEventId = null;
   }
 
-  function deleteCurrentEvent() {
+  async function deleteCurrentEvent() {
     if (!viewingEventId) return;
     if (!confirm('Excluir esta ação?')) return;
     events = events.filter(e => e.id !== viewingEventId);
-    saveEvents(events);
     closeDetailModal();
     render();
+    await saveEvents(events);
   }
 
   function closeOnOverlay(e, id) {
@@ -868,8 +992,7 @@
     }
   }
 
-  // ---- INIT ----
-  render();
+  // ---- INIT já chamado acima ----
 </script>
 </body>
 </html>
